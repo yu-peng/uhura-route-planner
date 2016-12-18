@@ -1,0 +1,1441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no, minimal-ui">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="grey">
+
+    <meta name="description" content="A demostration of simple temporal-spatial understanding using a path planner.">
+    <meta name="author" content="Peng Yu">
+
+    <title>Temporal and Spatial Reasoning Demo</title>
+
+    <!-- Bootstrap core CSS -->
+    <link href="css/bootstrap.min.css" rel="stylesheet">
+    <!-- Bootstrap theme -->
+    <link href="css/bootstrap-theme.min.css" rel="stylesheet">
+
+    <!-- Custom styles for this template -->
+    <link href="css/template.css" rel="stylesheet">
+
+    <!-- Bootstrap core JavaScript -->
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/1.11.0/jquery.min.js"></script>
+    <script src="js/bootstrap.min.js"></script>
+    <script type="text/javascript" src="https://maps.googleapis.com/maps/api/js?v=3.exp&libraries=places"></script>
+
+
+    <script>
+//var singleSourceURL = "http://localhost:8080/route-planner/planner/SingleSource?";
+//var singleSourceSingleDestURL = "http://localhost:8080/route-planner/planner/SingleSourceSingleDest?";
+
+var singleSourceURL = "http://sun-nlulab14.nuance.com:8983/route-planner/planner/SingleSource?";
+var singleSourceSingleDestURL = "http://sun-nlulab14.nuance.com:8983/route-planner/planner/SingleSourceSingleDest?";
+var singleSourceSingleDestSingleWptURL = "http://sun-nlulab14.nuance.com:8983/route-planner/planner/SingleSourceSingleDestSingleWpt?";
+
+var map = null;
+var current_location = new google.maps.LatLng(37.379715,-121.997060);
+
+var originMarker = null;
+var destinationMarker = null;
+var waypointMarker = null;
+var currentMarker = null;
+
+var direct_route = null;
+var direct_route_duration = null;
+var direct_route_cost = null;
+var direct_route_distance = null;
+
+var poiMarkers = {};
+var poiTypes = {};
+var poiRatings = {};
+var poiPrices = {};
+
+var poiWindows = {};
+var poiRoutes = {};
+var poiPolylines = {};
+
+var options = {};
+var routeMarkers = [];
+var tempPolylines = [];
+
+var state = 0; // 0 for nothing; 1 for multi destination; 2 for single destination; 3 for single destination single route
+var currentDestination = null;
+
+var durationLimit = 30;
+var distanceLimit = 30;
+var offsetCoef = 1;
+var northAngleLimit = 180;
+var queryType = 1; // 1 for single source; 2 for single source single destination; 3 for single source single destination single waypoint
+
+function initialize() {
+
+    options["origin"] = null;
+    options["pois"] = null;
+    options["destination"] = null;
+    options["mode"] = "driving";
+
+    var mapProp = {
+        center: current_location,
+        zoom: 13,
+        zoomControl: false,
+        zoomControlOptions: {
+            position: google.maps.ControlPosition.LEFT_CENTER
+        },
+        panControl: false,
+        panControlOptions: {
+            position: google.maps.ControlPosition.LEFT_BOTTOM
+        },
+        mapTypeControl: false,
+        scaleControl: true,
+        streetViewControl: false,
+        overviewMapControl: false,
+        rotateControl: true,
+        draggable: true,
+        mapTypeId: google.maps.MapTypeId.ROADMAP
+    };
+
+    map = new google.maps.Map(document.getElementById("googleMap"), mapProp);
+
+    /* Get Origin */
+
+    var originInput = document.getElementById('originInput');
+    var origin_autocomplete = new google.maps.places.Autocomplete(originInput);
+    var originInfoWindow = new google.maps.InfoWindow();
+    origin_autocomplete.bindTo('bounds', map);
+    
+    google.maps.event.addListener(origin_autocomplete, 'place_changed', function() {
+
+        /* clear previous markers */
+        clearOverlays();
+    	showAllDestinations();
+
+        var origin = origin_autocomplete.getPlace();
+        if (origin.geometry) {
+
+            originInfoWindow.close();
+            addOriginIndicator(origin.geometry.location, origin.name);
+        }
+
+        refresh();
+    });
+
+    /* Get Waypoint */
+
+    var waypointInput = document.getElementById('waypointInput');
+    var waypoint_autocomplete = new google.maps.places.Autocomplete(waypointInput);
+    var waypointInfoWindow = new google.maps.InfoWindow();
+    waypoint_autocomplete.bindTo('bounds', map);
+    
+    google.maps.event.addListener(waypoint_autocomplete, 'place_changed', function() {
+
+        /* clear previous markers */
+        clearOverlays();
+        showAllDestinations();
+
+        var waypoint = waypoint_autocomplete.getPlace();
+        if (waypoint.geometry) {
+
+            waypointInfoWindow.close();
+            addWaypointIndicator(waypoint.geometry.location, waypoint.name);
+        }
+
+        refresh();
+    });
+
+    /* Get Destination */
+
+    var destinationInput = document.getElementById('destinationInput');
+    var destination_autocomplete = new google.maps.places.Autocomplete(destinationInput);
+    var destinationInfoWindow = new google.maps.InfoWindow();
+    destination_autocomplete.bindTo('bounds', map);
+    
+    google.maps.event.addListener(destination_autocomplete, 'place_changed', function() {
+
+        /* clear previous markers */
+        clearOverlays();
+    	showAllDestinations();
+
+        var destination = destination_autocomplete.getPlace();
+        if (destination.geometry) {
+
+            destinationInfoWindow.close();
+            addDestinationIndicator(destination.geometry.location, destination.name);
+        }
+
+        refresh();
+
+    });
+
+
+    /* Get POIs */
+
+    var poiInput = document.getElementById('poiInput');
+    var searchBox = new google.maps.places.SearchBox(poiInput);
+    searchBox.bindTo('bounds', map);
+
+    google.maps.event.addListener(searchBox, 'places_changed', function() {
+
+        /* clear previous markers */
+        clearOverlays();
+
+        poiMarkers = {};
+        poiWindows = {};
+        poiPolylines = {};
+
+        var pois = searchBox.getPlaces();
+
+        /* For each place, get the icon, place name, and location. */
+        var bounds = new google.maps.LatLngBounds();
+        for (var i = 0; i < Math.min(50, pois.length); i++) {
+
+            var poi = pois[i];
+            bounds.extend(poi.geometry.location);
+
+            /* Create a marker for each place. */
+            addPOIIndicator(poi);
+        }
+
+        if (originMarker != null) {
+            bounds.extend(originMarker.getPosition());
+        }
+
+        if (destinationMarker != null) {
+            bounds.extend(destinationMarker.getPosition());
+        }
+        map.fitBounds(bounds);
+
+        if (map.getZoom() > 17) {
+            map.setZoom(17);
+        }
+
+        refresh();
+
+    });
+
+    setTypeNear();
+    setModeDriving();
+
+}
+
+/* Resize google map based on browser size */
+$(function() {
+    var windowHeight = jQuery(window).height();
+    document.getElementById('mapContainer').style.height = windowHeight+ 'px';     
+});
+
+
+$(window).resize(function() {
+    var win = $(this);
+    var height = win.height();
+    var width = win.width();
+    document.getElementById('mapContainer').style.height = height + 'px';
+
+    if (width < document.getElementById('routesContainer').style.maxWidth){
+        if (width < document.getElementById('routesContainer').style.width){
+            document.getElementById('routesContainer').style.width = width;
+        }
+    }
+});
+
+google.maps.event.addDomListener(window, 'load', initialize);
+
+
+function addOriginIndicator(position, description) {
+
+    if (originMarker == null){
+        originMarker = new google.maps.Marker({
+            map: map,
+            icon: 'http://maps.google.com/mapfiles/ms/icons/red-dot.png',
+            title: description,
+            position: position
+        });
+    } else {
+        originMarker.setTitle(description);
+        originMarker.setPosition(position);
+        originMarker.setMap(map);
+    }
+
+    var htmlContent = '<div id="container">' +
+        '<div style="float:center;">' + originMarker.getTitle() +
+        '</div>' +
+        '</div>';
+
+    originInfoWindow = new google.maps.InfoWindow({
+        content: htmlContent,
+    });
+
+    google.maps.event.addListener(originMarker, 'click', function() {
+        originInfoWindow.open(map, originMarker);
+    });
+
+    var bounds = new google.maps.LatLngBounds();
+    extendBounds(bounds);
+}
+
+function addWaypointIndicator(position, description) {
+
+    if (waypointMarker == null){
+        waypointMarker = new google.maps.Marker({
+            map: map,
+            icon: 'http://maps.google.com/mapfiles/ms/icons/purple-dot.png',
+            title: description,
+            position: position
+        });
+    } else {
+        waypointMarker.setTitle(description);
+        waypointMarker.setPosition(position);
+        waypointMarker.setMap(map);
+    }
+
+    var htmlContent = '<div id="container">' +
+        '<div style="float:center;">' + waypointMarker.getTitle() +
+        '</div>' +
+        '</div>';
+
+    waypointInfoWindow = new google.maps.InfoWindow({
+        content: htmlContent,
+    });
+
+    google.maps.event.addListener(waypointMarker, 'click', function() {
+        waypointInfoWindow.open(map, waypointMarker);
+    });
+
+    var bounds = new google.maps.LatLngBounds();
+    extendBounds(bounds);
+}
+
+function addDestinationIndicator(position, description) {
+
+    if (destinationMarker == null){
+        destinationMarker = new google.maps.Marker({
+            map: map,
+            icon: 'http://maps.google.com/mapfiles/ms/icons/green-dot.png',
+            title: description,
+            position: position
+        });
+    } else {
+        destinationMarker.setTitle(description);
+        destinationMarker.setPosition(position);
+        destinationMarker.setMap(map);
+    }
+
+    var htmlContent = '<div id="container">' +
+        '<div style="float:center;">' + destinationMarker.getTitle() +
+        '</div>' +
+        '</div>';
+
+    destinationInfoWindow = new google.maps.InfoWindow({
+        content: htmlContent,
+    });
+
+    google.maps.event.addListener(destinationMarker, 'click', function() {
+        destinationInfoWindow.open(map, destinationMarker);
+    });
+
+    var bounds = new google.maps.LatLngBounds();
+    extendBounds(bounds);
+
+}
+
+function extendBounds(bounds){
+
+    for (var key in poiMarkers) {
+        bounds.extend(poiMarkers[key].getPosition());
+    }
+
+    if (originMarker != null){
+        bounds.extend(originMarker.getPosition());
+    }
+
+    if (waypointMarker != null){
+        bounds.extend(waypointMarker.getPosition());
+    }
+
+    if (destinationMarker != null){
+        bounds.extend(destinationMarker.getPosition());
+    }
+
+    map.fitBounds(bounds);
+
+    if (map.getZoom() > 15) {
+        map.setZoom(15);
+    }
+}
+
+function addPOIIndicator(poi) {
+
+    var poiMarker = new google.maps.Marker({
+        map: map,
+        icon: 'http://maps.google.com/mapfiles/ms/icons/blue-dot.png',
+        title: poi.name,
+        position: poi.geometry.location
+    });
+
+    poiMarkers[poi.geometry.location.toUrlValue()] = poiMarker;
+    poiTypes[poi.geometry.location.toUrlValue()] = poi.icon;
+    poiRatings[poi.geometry.location.toUrlValue()] = poi.rating;
+    poiPrices[poi.geometry.location.toUrlValue()] = poi.price_level;
+    poiWindows[poi.geometry.location.toUrlValue()] = attachInfoWindow(poiMarker, map);
+}
+
+function refresh(){
+	if (queryType == 1){
+		planSingleSource();
+	} else if (queryType == 2){
+		planSingleSourceSingleDest();
+	} else if (queryType == 3){
+        planSingleSourceSingleDestSingleWpt();
+    }
+}
+
+function planSingleSource() {
+
+    if (originMarker != null) {
+
+        if (!isEmpty(poiMarkers)) {
+
+            options["origin"] = originMarker.getPosition().lat()+","+originMarker.getPosition().lng();
+
+            var poiDescription = [];
+
+            for (var key in poiMarkers) {
+                if (poiDescription.length == 0) {
+                    poiDescription.push(poiMarkers[key].getPosition().toUrlValue());
+                } else {
+                    poiDescription.push("," + poiMarkers[key].getPosition().toUrlValue());
+                }
+            }
+
+            options["pois"] = poiDescription.join("");
+
+            var url = [];
+            url.push(singleSourceURL);
+
+            for (var key in options) {
+                var value = options[key];
+                if (value != null && value != undefined) {
+                    url.push(key + "=" + value + "&");
+                }
+            }
+    		console.log(url.join(""));
+
+            querySingleSource(url);
+
+        } else {
+            /* showWarning("NO VALID DESTINATION HAS BEEN SPECIFIED"); */
+        }
+
+    } else {
+        /* showWarning("NO VALID ORIGIN HAS BEEN SPECIFIED"); */
+    }
+}
+
+
+function querySingleSource(url){
+
+    busy();
+
+    $.getJSON(url.join(""), function(data) {
+
+    	console.log(data);
+
+        clearOverlays();
+
+        poiRoutes = {};
+        poiPolylines = {};
+
+        var routes = data.routes;
+
+        /* Iterate over each route */
+        if (routes != undefined) {
+            for (var i = 0; i < routes.length; i++) {
+				if (routes[i].Route != undefined){
+	                var name = routes[i].POILat + "," + routes[i].POILon;
+	                var routeDetails = routes[i].Route;
+	                var duration = routeDetails.duration;
+	                var cost = routeDetails.cost;
+	                var distance = routeDetails.distance;
+	                var infoWindow = poiWindows[name];
+
+	                infoWindow.setContent(generatePOIDescription(routes[i]));               
+
+	                var path = extractRoutePath(routeDetails.polyline);
+
+	                var polyline = new google.maps.Polyline({
+	                    path: path,
+	                    strokeColor: "#0000FF",
+	                    strokeOpacity: 0.6,
+	                    strokeWeight: 3
+	                });
+
+	                poiRoutes[name] = {
+	                    "Time": duration,
+	                    "Cost": cost,
+	                    "Distance": distance,
+	                    "DestLat": routes[i].POILat,
+	                	"DestLon": routes[i].POILon,
+	                };
+	                poiPolylines[name] = polyline;
+				}
+            }
+        }
+        // hideDestinationInput();
+        showAllDestinations();
+        ready();
+
+    });
+
+}
+
+function planSingleSourceSingleDest() {
+
+    if (originMarker != null && destinationMarker != null) {
+
+        if (!isEmpty(poiMarkers)) {
+
+            options["origin"] = originMarker.getPosition().lat()+","+originMarker.getPosition().lng();
+            options["destination"] = destinationMarker.getPosition().lat()+","+destinationMarker.getPosition().lng();
+
+            var poiDescription = [];
+
+            for (var key in poiMarkers) {
+                if (poiDescription.length == 0) {
+                    poiDescription.push(poiMarkers[key].getPosition().toUrlValue());
+                } else {
+                    poiDescription.push("," + poiMarkers[key].getPosition().toUrlValue());
+                }
+            }
+
+            options["pois"] = poiDescription.join("");
+
+            var url = [];
+            url.push(singleSourceSingleDestURL);
+
+            for (var key in options) {
+                var value = options[key];
+                if (value != null && value != undefined) {
+                    url.push(key + "=" + value + "&");
+                }
+            }
+    		console.log(url.join(""));
+
+            querySingleSourceSingleDest(url);
+
+        } else {
+            /* showWarning("NO VALID DESTINATION HAS BEEN SPECIFIED"); */
+        }
+
+    } else {
+        /* showWarning("NO VALID ORIGIN HAS BEEN SPECIFIED"); */
+    }
+}
+
+function querySingleSourceSingleDest(url){
+
+    busy();
+
+    $.getJSON(url.join(""), function(data) {
+
+    	console.log(data);
+
+        clearOverlays();
+
+        poiRoutes = {};
+        poiPolylines = {};
+
+        var routes = data.routes;
+
+        /* Iterate over each route */
+        if (routes != undefined) {
+
+        	direct_route = data.DirectRoute;
+        	var direct_route_name = direct_route.POILat + "," + direct_route.POILon;
+            var direct_route_details = direct_route.Route;
+            direct_route_duration = direct_route_details.duration;
+            direct_route_cost = direct_route_details.cost;
+            direct_route_distance = direct_route_details.distance;
+
+            var direct_route_path = extractRoutePath(direct_route_details.polyline);
+
+            var direct_route_polyline = new google.maps.Polyline({
+                path: direct_route_path,
+                strokeColor: "#0000FF",
+                strokeOpacity: 0.6,
+                strokeWeight: 3
+            });
+
+            poiRoutes[direct_route_name] = {
+                "Time": direct_route_duration,
+                "Cost": direct_route_cost,
+                "Distance": direct_route_distance,
+                "DestLat": direct_route.POILat,
+                "DestLon": direct_route.POILon,
+            };
+            poiPolylines[direct_route_name] = direct_route_polyline;
+
+            for (var i = 0; i < routes.length; i++) {
+				if (routes[i].Route != undefined){
+					var name = routes[i].POILat + "," + routes[i].POILon;
+	                var routeDetails = routes[i].Route;
+	                var duration = routeDetails.duration;
+	                var cost = routeDetails.cost;
+	                var distance = routeDetails.distance;
+	                var infoWindow = poiWindows[name];
+
+	                infoWindow.setContent(generatePOIDescription(routes[i]));               
+
+	                var path = extractRoutePath(routeDetails.polyline);
+
+	                var polyline = new google.maps.Polyline({
+	                    path: path,
+	                    strokeColor: "#0000FF",
+	                    strokeOpacity: 0.6,
+	                    strokeWeight: 3
+	                });
+
+	                poiRoutes[name] = {
+	                    "Time": duration,
+	                    "Cost": cost,
+	                    "Distance": distance,
+	                    "DestLat": routes[i].POILat,
+	                	"DestLon": routes[i].POILon,
+	                };
+	                poiPolylines[name] = polyline;
+				}
+            }
+        }
+        // hideDestinationInput();
+        showAllDestinations();
+        ready();
+
+    });
+
+}
+
+function planSingleSourceSingleDestSingleWpt() {
+
+    if (originMarker != null && destinationMarker != null && waypointMarker != null) {
+
+        if (!isEmpty(poiMarkers)) {
+
+            options["origin"] = originMarker.getPosition().lat()+","+originMarker.getPosition().lng();
+            options["waypoint"] = waypointMarker.getPosition().lat()+","+waypointMarker.getPosition().lng();
+            options["destination"] = destinationMarker.getPosition().lat()+","+destinationMarker.getPosition().lng();
+
+            var poiDescription = [];
+
+            for (var key in poiMarkers) {
+                if (poiDescription.length == 0) {
+                    poiDescription.push(poiMarkers[key].getPosition().toUrlValue());
+                } else {
+                    poiDescription.push("," + poiMarkers[key].getPosition().toUrlValue());
+                }
+            }
+
+            options["pois"] = poiDescription.join("");
+
+            var url = [];
+            url.push(singleSourceSingleDestSingleWptURL);
+
+            for (var key in options) {
+                var value = options[key];
+                if (value != null && value != undefined) {
+                    url.push(key + "=" + value + "&");
+                }
+            }
+            console.log(url.join(""));
+
+            querySingleSourceSingleDestSingleWpt(url);
+
+        } else {
+            /* showWarning("NO VALID DESTINATION HAS BEEN SPECIFIED"); */
+        }
+
+    } else {
+        /* showWarning("NO VALID ORIGIN HAS BEEN SPECIFIED"); */
+    }
+}
+
+function querySingleSourceSingleDestSingleWpt(url){
+
+    busy();
+
+    $.getJSON(url.join(""), function(data) {
+
+        console.log(data);
+
+        clearOverlays();
+
+        poiRoutes = {};
+        poiPolylines = {};
+
+        var routes = data.routes;
+
+        /* Iterate over each route */
+        if (routes != undefined) {
+
+            direct_route = data.DirectRoute;
+            var direct_route_name = direct_route.POILat + "," + direct_route.POILon;
+            var direct_route_details = direct_route.Route;
+            direct_route_duration = direct_route_details.duration;
+            direct_route_cost = direct_route_details.cost;
+            direct_route_distance = direct_route_details.distance;
+
+            var direct_route_path = extractRoutePath(direct_route_details.polyline);
+
+            var direct_route_polyline = new google.maps.Polyline({
+                path: direct_route_path,
+                strokeColor: "#0000FF",
+                strokeOpacity: 0.6,
+                strokeWeight: 3
+            });
+
+            poiRoutes[direct_route_name] = {
+                "Time": direct_route_duration,
+                "Cost": direct_route_cost,
+                "Distance": direct_route_distance,
+                "DestLat": direct_route.POILat,
+                "DestLon": direct_route.POILon,
+            };
+            poiPolylines[direct_route_name] = direct_route_polyline;
+
+            for (var i = 0; i < routes.length; i++) {
+				if (routes[i].Route != undefined){
+	                var name = routes[i].POILat + "," + routes[i].POILon;
+	                var routeDetails = routes[i].Route;
+	                var duration = routeDetails.duration;
+	                var cost = routeDetails.cost;
+	                var distance = routeDetails.distance;
+	                var wpt_time = routes[i].WPTTime;
+	                var wpt_distance = routes[i].WPTDistance;
+	                var infoWindow = poiWindows[name];
+
+	                infoWindow.setContent(generatePOIDescription(routes[i]));               
+
+	                var path = extractRoutePath(routeDetails.polyline);
+
+	                var polyline = new google.maps.Polyline({
+	                    path: path,
+	                    strokeColor: "#0000FF",
+	                    strokeOpacity: 0.6,
+	                    strokeWeight: 3
+	                });
+
+	                poiRoutes[name] = {
+	                    "Time": duration,
+	                    "Cost": cost,
+	                    "Distance": distance,
+	                    "WPTTime": wpt_time,
+	                    "WPTDistance": wpt_distance,
+	                    "DestLat": routes[i].POILat,
+	                	"DestLon": routes[i].POILon,
+	                };
+	                poiPolylines[name] = polyline;
+				}
+            }
+        }
+        // hideDestinationInput();
+        showAllDestinations();
+        ready();
+
+    });
+
+}
+
+function clearRouteDisplay() {
+    var routesDiv = document.getElementById("routes");
+    while (routesDiv.firstChild) {
+        routesDiv.removeChild(routesDiv.firstChild);
+    }
+    return routesDiv;
+}
+
+function generatePOIDescription(poiRoute){
+
+    var poiName = poiRoute.POILat + "," + poiRoute.POILon;
+
+    var time = poiRoute.Route.duration;
+    var cost = poiRoute.Route.cost;
+    var distance = poiRoute.Route.distance;
+    var marker = poiMarkers[poiName];
+    var infoWindow = poiWindows[poiName];
+
+    var icon = poiTypes[poiName];
+    var rating = poiRatings[poiName];
+    var price = poiPrices[poiName];
+
+    var htmlContent = [];
+    htmlContent.push('<div style="text-align:center;cursor:pointer;font-size:14px;" onclick="showSinglePOIRoutes(' + poiName + ')">');
+
+    htmlContent.push('&nbsp;');
+
+    htmlContent.push(marker.getTitle());
+
+    if (rating != undefined || price != undefined) {
+        htmlContent.push('<br>');
+
+        if (rating != undefined) {
+            for (var j = 1; j <= 5; j++) {
+                if (j <= rating) {
+                    htmlContent.push('&#9733;');
+                } else {
+                    htmlContent.push('&#9734;');
+                }
+            }
+        }
+
+        if (rating != undefined && price != undefined) {
+            htmlContent.push('&nbsp;/&nbsp;');
+        }
+
+        if (price != undefined) {
+            for (var j = 0; j < price; j++) {
+                htmlContent.push('$');
+            }
+        }
+    }
+
+	htmlContent.push('<br><img src="icons/speed.png" height="12" width="12" style="margin-top:0px;padding-top:0px"> ' + time.toFixed(1) + ' mins / <img src="icons/road.png" height="14" width="14" style="margin:0px;padding:2px">' + distance.toFixed(1) + ' miles');
+	
+	if ((queryType == 2 || queryType == 3) && direct_route_duration != null && direct_route_distance != null){
+		htmlContent.push('<br>DeltaT: ' + (time - direct_route_duration).toFixed(1) + ' mins / DeltaD: ' + (distance - direct_route_distance).toFixed(1) + ' miles');
+
+        if (queryType == 3){
+            htmlContent.push('<br>OffsetT: ' + poiRoute.WPTTime.toFixed(1) + ' mins / OffsetD: ' + poiRoute.WPTDistance.toFixed(1) + ' miles');
+        }
+	}
+
+
+
+    htmlContent.push('</div>');
+
+    return htmlContent.join("");
+
+}
+
+function extractRoutePath(polyline_description) {
+
+    var path = [];
+    var points = polyline_description.split(",");
+
+    for (var i = 0; i < points.length / 2; i++) {
+
+        var point = new google.maps.LatLng(points[2 * i], points[2 *i + 1]);
+        path.push(point);
+
+    }
+
+    return path;
+}
+
+function extractActivityPath(activity) {
+
+    var path = [];
+    var points = activity.polyline.split(",");
+
+    for (var k = 0; k < points.length / 2; k++) {
+
+        var point = new google.maps.LatLng(points[2 * k], points[2 * k + 1]);
+        path.push(point);
+
+    }
+
+    return path;
+}
+
+function showAllDestinations() {
+
+    if (Object.keys(poiMarkers).length > 0){
+
+		clearOverlays();
+
+	    state = 1;
+
+	    clearRouteDisplay();
+	    showPOIMarkers();
+	    resizeMapViewForDestinations();
+	    closeAllPOIWindows();
+	    if (Object.keys(poiRoutes).length > 0){
+    		showAllPOIPolylines();
+    	}
+    }
+
+}
+
+function closeAllPOIWindows() {
+
+    for (var key in poiWindows) {
+        var infoWindow = poiWindows[key];
+
+        if (infoWindow != undefined) {
+            infoWindow.close();
+        }
+    }
+}
+
+function showPOIMarkers() {
+
+    for (var key in poiMarkers) {
+
+        var marker = poiMarkers[key];
+        hideMarker(marker);
+
+        // Is the destination takes more time than required?
+        var route = poiRoutes[key];
+
+        if (route != null){
+
+            if (satisfied(route)){
+                marker.icon = 'http://maps.google.com/mapfiles/ms/icons/blue-dot.png';
+	        } else {
+                marker.icon = 'http://maps.google.com/mapfiles/ms/icons/yellow-dot.png';
+	        }
+
+        }
+
+        showMarker(marker);
+    }
+}
+
+function showAllPOIPolylines() {
+
+    for (var key in poiMarkers) {
+
+        var polyline = poiPolylines[key];
+
+        if (polyline != undefined) {
+
+            polyline.setMap(null);
+
+            // Is the destination takes more time than required?
+            var route = poiRoutes[key];
+
+			if (satisfied(route)){
+                polyline.strokeColor = "#0000FF";
+            } else {
+                polyline.strokeColor = "#727272";
+            }
+
+            polyline.setMap(map);
+        }
+    }
+}
+
+function satisfied(route){
+
+	// check if the angle constraint is satisfied
+	// only apply to near at the moment
+	if (queryType == 1){
+		if (originMarker != null) {
+
+	        var y = Math.sin(route.DestLon-originMarker.getPosition().lng()) * Math.cos(route.DestLat);
+			var x = Math.cos(originMarker.getPosition().lat())*Math.sin(route.DestLat) 
+			- Math.sin(originMarker.getPosition().lat())*Math.cos(route.DestLat)*Math.cos(route.DestLon-originMarker.getPosition().lng());
+			var brng = Math.atan2(y, x) * (180/3.1415926);
+
+			// console.log('Bearing: ' + brng);
+
+			if (Math.abs(brng) > northAngleLimit){
+				return false;
+			}
+
+        }
+	}
+
+    if (queryType == 2 && direct_route_duration != null && direct_route_distance != null){
+
+        if ((route.Time - direct_route_duration) > durationLimit || 
+            (route.Distance - direct_route_distance) > distanceLimit){
+            return false;
+        } else {
+            return true;
+        }
+
+    } else if (queryType == 3 && direct_route_duration != null && direct_route_distance != null){
+
+
+
+        if (offsetCoef*(route.Time - direct_route_duration) + (2-offsetCoef)*route.WPTTime > durationLimit || 
+            offsetCoef*(route.Distance - direct_route_distance) + (2-offsetCoef)*route.WPTDistance > distanceLimit){
+            return false;
+        } else {
+            return true;
+        }
+
+    } else {
+
+        if (route.Time > durationLimit || route.Distance > distanceLimit){
+            return false;
+        } else {
+            return true;
+        }
+    }
+}
+
+function resizeMapViewForDestinations() {
+
+    var bounds = new google.maps.LatLngBounds();
+
+    for (var key in poiMarkers) {
+        bounds.extend(poiMarkers[key].getPosition());
+    }
+
+    if (originMarker != null){
+    	bounds.extend(originMarker.getPosition());
+    }
+
+    if (destinationMarker != null){
+    	bounds.extend(destinationMarker.getPosition());
+    }
+
+    map.fitBounds(bounds);
+}
+
+
+
+function showSinglePOIRoutes(poiLat,poiLon) {
+
+	var poiName = poiLat+","+poiLon
+    var bounds = new google.maps.LatLngBounds();
+    var marker = poiMarkers[poiName];
+    var polyline = poiPolylines[poiName];
+
+    if (marker != undefined && polyline != undefined) {
+
+        clearOverlays();
+        /* adding basic elements: destination marker, infowindow, etc */
+        marker.setMap(map);
+        bounds.extend(marker.getPosition());
+
+        var infoWindow = poiWindows[poiName];
+        infoWindow.open(map, marker);
+
+        showPolyline(polyline);
+
+        if (originMarker != null){
+	        bounds.extend(originMarker.getPosition());
+        }
+
+        if (destinationMarker != null){
+	        bounds.extend(destinationMarker.getPosition());
+        }
+
+	    map.fitBounds(bounds);
+
+	    state = 2;
+	    currentDestination = poiName;
+
+    } else {
+    	console.log("Cannot find route for POI " + poiName);
+    }
+
+
+}
+
+function clearOverlays() {
+
+    state = 0;
+
+    for (var i = 0; i < routeMarkers.length; i++) {
+        if (routeMarkers[i] != undefined) {
+            routeMarkers[i].setMap(null);
+        }
+    }
+
+    routeMarkers = [];
+
+    //clear additional polylines
+    for (var i = 0; i < tempPolylines.length; i++) {
+        if (tempPolylines[i] != undefined) {
+            tempPolylines[i].setMap(null);
+        }
+    }
+
+    tempPolylines = [];
+
+    for (var key in poiMarkers) {
+
+        var marker = poiMarkers[key];
+        var polyline = poiPolylines[key];
+
+        if (marker != undefined) {
+            marker.setMap(null);
+        }
+
+        if (polyline != undefined) {
+            polyline.setMap(null);
+        }
+
+    }
+
+    for (var key in poiWindows) {
+        var infoWindow = poiWindows[key];
+
+        if (infoWindow != undefined) {
+            infoWindow.close();
+        }
+    }
+}
+
+function hideMarker(marker) {
+    marker.setMap(null);
+}
+
+function showMarker(marker) {
+    marker.setMap(map);
+}
+
+function showSinglePOIPolylines(polylines) {
+
+    for (var i = 0; i < polylines.length; i++) {
+        showPolyline(polylines[i]);
+    }
+
+}
+
+function showPolyline(polyline) {
+
+    polyline.setMap(map);
+
+}
+
+function attachInfoWindow(marker, map) {
+
+    var htmlContent = '<div id="container">' +
+        '<div style="float:center;">' + marker.getTitle() +
+        '<br>? mins' +
+        '<br>$ ?' +
+        '</div>' +
+        '</div>';
+
+    var infoWindow = new google.maps.InfoWindow({
+        content: htmlContent
+    });
+
+    google.maps.event.addListener(marker, 'click', function() {
+        for (var key in poiWindows) {
+            poiWindows[key].close();
+        }
+        infoWindow.open(map, marker);
+    });
+
+    return infoWindow;
+}
+
+function triggerGraphUpdate(){
+
+    if (state == 1){
+
+        // multi destination mode
+        showAllPOIPolylines();
+        showPOIMarkers();
+
+    } else if (state == 2) {
+
+        // single destination mode
+        if (currentDestination != null){
+        }
+
+    } else if (state == 3) {
+
+        // Single destination single route mode
+        if (currentDestination != null){
+
+        }
+    }
+}
+
+function isEmpty(ob) {
+    for (var i in ob) {
+        return false;
+    }
+    return true;
+}
+
+function busy() {
+    document.getElementById("refresh_button").innerHTML = '<img src="icons/loading.gif" height="30" width="30">';
+}
+
+function ready() {
+    document.getElementById("refresh_button").innerHTML = '';
+    //'<img src="icons/refresh.png" height="30" width="30">';
+}
+
+function hideDestinationInput(){
+
+    document.getElementById("destinationInputDiv").style.display = "none";
+    document.getElementById("toggle_input_button").onclick = function(){showDestinationInput();};
+    document.getElementById("toggle_input_button").innerHTML = '<img src="icons/extend.png" height="15px" width="100px">';
+
+}
+
+function showDestinationInput(){
+
+    document.getElementById("destinationInputDiv").style.display = "table";
+    document.getElementById("toggle_input_button").onclick = function(){hideDestinationInput();};
+    document.getElementById("toggle_input_button").innerHTML = '<img src="icons/retract.png" height="15px" width="100px">';
+
+}
+
+function hideConstraintInput(){
+
+    document.getElementById("constraintInputDiv").style.display = "none";
+    document.getElementById("toggle_constraint_button").onclick = function(){showConstraintInput();};
+    document.getElementById("toggle_constraint_button").innerHTML = '<img src="icons/retract.png" height="15px" width="100px" style="margin-bottom:10px">';
+
+}
+
+function showConstraintInput(){
+
+    document.getElementById("constraintInputDiv").style.display = "table";
+    document.getElementById("toggle_constraint_button").onclick = function(){hideConstraintInput();};
+    document.getElementById("toggle_constraint_button").innerHTML = '<img src="icons/extend.png" height="15px" width="100px">';
+
+}
+
+function setTypeNear(){
+	
+    document.getElementById("btn-near").className = "btn btn-warning";
+    document.getElementById("btn-between").className = "btn btn-default";
+    document.getElementById("btn-betweenplus").className = "btn btn-default";
+    document.getElementById("waypointInput").style.display = 'none';
+    document.getElementById("destinationInput").style.display = 'none';
+    document.getElementById("angleDisplayContainer").style.display = 'table-row';
+    document.getElementById("angleSliderContainer").style.display = 'table-row';
+    document.getElementById("offsetDisplayContainer").style.display = 'none';
+    document.getElementById("offsetSliderContainer").style.display = 'none';
+    document.getElementById("timeConstraintTitle").innerHTML= "WITHIN ";
+    document.getElementById("distanceConstraintTitle").innerHTML= "WITHIN ";
+
+    if (queryType != 1){
+        queryType = 1;        
+        refresh();
+    }
+}
+
+function setTypeBetween(){
+	
+    document.getElementById("btn-near").className = "btn btn-default";
+    document.getElementById("btn-between").className = "btn btn-warning";
+    document.getElementById("btn-betweenplus").className = "btn btn-default";
+    document.getElementById("waypointInput").style.display = 'none';
+    document.getElementById("destinationInput").style.display = 'table-cell';
+    document.getElementById("angleDisplayContainer").style.display = 'none';
+    document.getElementById("angleSliderContainer").style.display = 'none';
+    document.getElementById("offsetDisplayContainer").style.display = 'none';
+    document.getElementById("offsetSliderContainer").style.display = 'none';
+    document.getElementById("timeConstraintTitle").innerHTML= "MAX. DELTA ";
+    document.getElementById("distanceConstraintTitle").innerHTML= "MAX. DELTA ";
+
+    if (queryType != 2){
+        queryType = 2;    
+        refresh();
+    }
+}
+
+function setTypeBetweenPlus(){
+    
+    document.getElementById("btn-near").className = "btn btn-default";
+    document.getElementById("btn-between").className = "btn btn-default";
+    document.getElementById("btn-betweenplus").className = "btn btn-warning";
+    document.getElementById("waypointInput").style.display = 'table-cell';
+    document.getElementById("destinationInput").style.display = 'table-cell';
+    document.getElementById("angleDisplayContainer").style.display = 'none';
+    document.getElementById("angleSliderContainer").style.display = 'none';
+    document.getElementById("offsetDisplayContainer").style.display = 'table-row';
+    document.getElementById("offsetSliderContainer").style.display = 'table-row';
+    document.getElementById("timeConstraintTitle").innerHTML= "MAX. DELTA ";
+    document.getElementById("distanceConstraintTitle").innerHTML= "MAX. DELTA ";
+
+    if (queryType != 3){
+        queryType = 3;    
+        refresh();
+    }
+}
+
+function showDuration(duration) {
+
+    durationLimit = convertDurationInput(duration);
+    document.getElementById("timeConstraintDisplay").innerHTML = durationLimit;
+    triggerGraphUpdate();
+}
+
+function convertDurationInput(input_duration){
+
+    var output_duration = 0;
+    input_duration /= 300;
+    output_duration = (300-1)*Math.pow(input_duration, 2.12372) + 1;
+    return Math.round(output_duration);
+}
+
+function showDistance(distance) {
+
+    distanceLimit = convertDistanceInput(distance);
+    document.getElementById("distanceConstraintDisplay").innerHTML = distanceLimit;
+    triggerGraphUpdate();
+}
+
+function convertDistanceInput(input_distance){
+
+    var output_distance = 0;
+    input_distance /= 300;
+    output_distance = (300-1)*Math.pow(input_distance, 2.12372) + 1;
+    return Math.round(output_distance);
+}
+
+function showOffsetCoef(offset_coef) {
+
+    offsetCoef = convertOffsetCoefInput(offset_coef);
+    document.getElementById("offsetCoefDisplay").innerHTML = offsetCoef.toFixed(2);
+    triggerGraphUpdate();
+}
+
+function convertOffsetCoefInput(input_offset){
+
+    var output_offset = 0;
+    output_offset = input_offset/300*2;
+    return output_offset;
+}
+
+function showAngle(angle) {
+
+	northAngleLimit = angle;
+    document.getElementById("angleConstraintDisplay").innerHTML = angle;
+    triggerGraphUpdate();
+}
+
+function setModeDriving(){
+	if (options["mode"] != "driving"){
+	    options["mode"] = "driving";
+	    refresh();
+	}
+}
+
+function setModeBiking(){
+	if (options["mode"] != "biking"){
+	    options["mode"] = "biking";
+	    refresh();		
+	}
+}
+
+function setModeWalking(){
+	if (options["mode"] != "walking"){
+	    options["mode"] = "walking";
+	    refresh();
+	}
+}
+
+</script>
+
+
+</head>
+
+<body>
+
+    <div id="mapContainer" style="width:100%;height:100vh;position:relative;">
+
+        <div id="googleMap" style = "width:100%;height:100%;position: absolute;top:0;left:0;z-index:5;"></div>
+
+        <div style="width:100%;position:absolute;top:0;left:0;z-index:10;">
+
+            <div id="destinationInputDiv" style="width:100%;max-width:700px;height:60px;margin:0 auto;display:table;background:url('images/white_transparent_background.png');background-size:100% 100%;">
+
+                <div style="display:table-row;padding:0px;margin:0px;text-align:center;">
+                    <input id="originInput" type="text" class="locationbox" placeholder="Origin">
+                    <input id="waypointInput" type="text" class="locationbox" placeholder="Waypoint">
+                    <input id="destinationInput" type="text" class="locationbox" placeholder="Destination">
+                    <input id="poiInput" type="text" class="locationbox" placeholder="POIs">
+                </div>
+                <div style="display:table-row;text-align:center;"> 
+        			<button type="button" id="btn-near" class="btn btn-warning" style="margin:5px" onClick="setTypeNear()">"NEAR"</button>
+        			<button type="button" id="btn-between" class="btn btn-default" style="margin:5px" onClick="setTypeBetween()">"BETWEEN"</button>
+                    <button type="button" id="btn-betweenplus" class="btn btn-default" style="margin:5px" onClick="setTypeBetweenPlus()">"BETWEEN+"</button>
+					<label><input type="radio" name="optradio" style="margin:5px" checked="checked" onClick="setModeDriving()">Driving</label>
+					<label><input type="radio" name="optradio" style="margin:5px" onClick="setModeBiking()">Biking</label>
+					<label><input type="radio" name="optradio" style="margin:5px" onClick="setModeWalking()">Walking</label>
+        			<span id="plan_button" onClick="refresh()" style="cursor:pointer;margin:5px"><img src="icons/refresh.png" height="25px" width="25px"></span>
+        			<button type="button" class="btn btn-info" style="margin:5px" onClick="showAllDestinations()">View All POIs</button>
+
+				</div>
+            </div>
+
+            <div style="width:100%;height:20px;margin-left:10px;margin-right:10px;margin-top:-3px;text-align:center;">
+                <span id="toggle_input_button" onClick="hideDestinationInput()" style="cursor:pointer;"><img src="icons/retract.png" height="15px" width="100px"></span>
+            </div>
+
+            <div id="routesContainer" style="width:100%;text-align:center;display:none">
+                <div style="max-width:100%;margin:0 auto;max-height:150px;padding-left:10px;padding-right:10px;padding-top:5px;padding-bottom:10px;overflow-x:scroll;background:url('images/white_transparent_background.png');background-size:100% 100%;background-repeat:no-repeat;display:inline-block;">
+
+                    <div id="routes" style="display:table;">
+
+                    </div>
+
+                </div>
+            </div>
+
+            <div style="width:100%;height:5px;margin-left:10px;margin-right:10px;text-align:center;">
+                <span id="refresh_button" onClick="planSingleSource()" style="cursor:pointer;"></span>
+            </div>
+
+        </div>
+
+
+        <div style="width:100%;position:absolute;top:0;left:0;z-index:15;text-align:center">            
+        </div>
+
+
+        <div style="width:100%;position:absolute;bottom:0;left:0;z-index:10;">
+
+            <div style="width:100%;height:20px;margin-left:10px;margin-right:10px;margin-bottom:-3px;text-align:center;">
+                <span id="toggle_constraint_button" onClick="hideConstraintInput()" style="cursor:pointer;"><img src="icons/extend.png" height="15px" width="100px"></span>
+            </div>
+
+            <div id="constraintInputDiv" style="width:100%;max-width:500px;padding-left:10px;padding-right:10px;padding-top:5px;padding-bottom:10px;margin:0 auto;background:url('images/white_transparent_background.png');background-size:100% 100%;background-repeat:no-repeat;display:table;">
+
+                <div id="offsetDisplayContainer" style="display:table-row">
+                    <span class="number-title" style="float: left;width:33.33333%;text-align:left;">CLOSER POI </span>
+                    <span class="number-display" style="float: left;width:33.33333%;text-align:center;" id="offsetCoefDisplay">1</span>
+                    <span class="number-title" style="float: left;width:33.33333%;text-align:right;"> SHORTER TRIP</span>
+                </div>
+
+                <div id="offsetSliderContainer" style="display:table-row;">
+                    <input id="offsetCoef" type="range" style="width:100%" oninput="showOffsetCoef(this.value)" min="1" max="300" value="150">
+                </div>
+
+                <div style="display:table-row">
+                    <span id="timeConstraintTitle" class="number-title">WITHIN </span>
+                    <span class="number-display" id="timeConstraintDisplay">30</span>
+                    <span class="number-title"> MINUTES</span>
+                </div>
+
+                <div style="display:table-row;">
+                    <input id="timeConstraint" type="range" style="width:100%" oninput="showDuration(this.value)" min="1" max="300" value="100">
+                </div>
+
+                <div style="display:table-row">
+                    <span id="distanceConstraintTitle" class="number-title">WITHIN </span>
+                    <span class="number-display" id="distanceConstraintDisplay">30</span>
+                    <span class="number-title"> MILES</span>
+                </div>
+
+                <div style="display:table-row;">
+                    <input id="distanceConstraint" type="range" style="width:100%" oninput="showDistance(this.value)" min="1" max="300" value="100">
+                </div>
+
+
+                <div id="angleDisplayContainer" style="display:table-row">
+                    <span id="angleConstraintTitle" class="number-title">WITHIN </span>
+                    <span class="number-display" id="angleConstraintDisplay">180</span>
+                    <span class="number-title"> DEGREE NORTH</span>
+                </div>
+
+                <div id="angleSliderContainer" style="display:table-row;">
+                    <input id="angleConstraint" type="range" style="width:100%" oninput="showAngle(this.value)" min="1" max="180" value="180">
+                </div>      
+            </div>
+        </div> 
+    </div>
+</body>
+</html>
